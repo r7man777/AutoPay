@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         Offene Belege Lexoffice
+// @name         AutoPay für Lexoffice
 // @namespace    http://tampermonkey.net/
-// @version      v5
-// @description  Offene Einnahmen werden automatisch vervollständigt.
+// @version      v3
+// @description  Ein Tampermonkey-Skript, das den Workflow in Lexoffice optimiert, indem es Rechnungen mit nur einem Klick automatisch als bezahlt markiert.
 // @author       r7
 // @match        https://app.lexoffice.de/vouchers
 // @icon         https://www.google.com/s2/favicons?sz=64&domain=lexoffice.de
@@ -24,11 +24,12 @@
         SCROLL_CONTAINER: '.list-group.grld-bs-list-group'
     };
 
-    const WAIT_TIME = 400;
     const MONITOR_INTERVAL = 500;
     const SCROLL_INTERVAL = 200;
-    const SCROLL_STEP = 800;
     const MAX_SCROLL_ATTEMPTS = 50;
+
+    const MAX_WAIT_TIME = 1000; // 10 Sekunden maximale Wartezeit
+    const CHECK_INTERVAL = 50; // Prüfe alle 50ms
 
     const BUTTON_STYLES = {
         margin: '5px',
@@ -244,6 +245,44 @@
         return true;
     };
 
+    // Warte auf Element
+    const waitForElement = async (selector, timeout = MAX_WAIT_TIME) => {
+        const startTime = Date.now();
+        
+        while (Date.now() - startTime < timeout) {
+            const element = document.querySelector(selector);
+            if (element) return element;
+            await sleep(CHECK_INTERVAL);
+        }
+        
+        return null;
+    };
+
+    // Warte bis Element verschwindet
+    const waitForElementToDisappear = async (selector, timeout = MAX_WAIT_TIME) => {
+        const startTime = Date.now();
+        
+        while (Date.now() - startTime < timeout) {
+            const element = document.querySelector(selector);
+            if (!element) return true;
+            await sleep(CHECK_INTERVAL);
+        }
+        
+        return false;
+    };
+
+    // Warte auf Änderung eines Elements
+    const waitForElementChange = async (element, initialValue, timeout = MAX_WAIT_TIME) => {
+        const startTime = Date.now();
+        
+        while (Date.now() - startTime < timeout) {
+            if (element.value !== initialValue) return true;
+            await sleep(CHECK_INTERVAL);
+        }
+        
+        return false;
+    };
+
     async function processBlock(divBlock, index, total, selectedMonth = null) {
         const dateText = extractDate(divBlock);
         if (selectedMonth) {
@@ -261,26 +300,48 @@
             return false;
         }
 
+        // Klicke Checkbox und warte auf den ersten Button
         checkmark.click();
-        await sleep(WAIT_TIME);
-
-        if (!await clickButton(SELECTORS.FIRST_BUTTON)) {
-            showStatus(`Fehler: Erster Button für Rechnung ${index + 1} nicht gefunden`, true);
+        const firstButton = await waitForElement(SELECTORS.FIRST_BUTTON);
+        if (!firstButton) {
+            showStatus(`Timeout: Erster Button für Rechnung ${index + 1} nicht gefunden`, true);
             return false;
         }
-        await sleep(WAIT_TIME);
 
-        if (!await setDateInput(dateText)) {
-            showStatus(`Fehler: Datum für Rechnung ${index + 1} konnte nicht gesetzt werden`, true);
+        // Klicke ersten Button und warte auf Datumseingabe
+        firstButton.click();
+        const dateInput = await waitForElement(SELECTORS.DATE_INPUT);
+        if (!dateInput) {
+            showStatus(`Timeout: Datumseingabe für Rechnung ${index + 1} nicht gefunden`, true);
             return false;
         }
-        
-        if (!await clickButton(SELECTORS.SECOND_BUTTON)) {
-            showStatus(`Fehler: Zweiter Button für Rechnung ${index + 1} nicht gefunden`, true);
+
+        // Setze Datum und warte auf Änderung
+        const initialValue = dateInput.value;
+        dateInput.value = dateText;
+        dateInput.dispatchEvent(new Event('input', { bubbles: true }));
+        const dateChanged = await waitForElementChange(dateInput, initialValue);
+        if (!dateChanged) {
+            showStatus(`Timeout: Datum für Rechnung ${index + 1} konnte nicht gesetzt werden`, true);
             return false;
         }
-        await sleep(WAIT_TIME);
 
+        // Warte auf zweiten Button und klicke
+        const secondButton = await waitForElement(SELECTORS.SECOND_BUTTON);
+        if (!secondButton) {
+            showStatus(`Timeout: Zweiter Button für Rechnung ${index + 1} nicht gefunden`, true);
+            return false;
+        }
+        secondButton.click();
+
+        // Warte bis Modal verschwindet
+        const modalGone = await waitForElementToDisappear(SELECTORS.SECOND_BUTTON);
+        if (!modalGone) {
+            showStatus(`Timeout: Modal für Rechnung ${index + 1} konnte nicht geschlossen werden`, true);
+            return false;
+        }
+
+        // Deselektiere die Checkbox
         const finalCheckmark = divBlock.querySelector(SELECTORS.CHECKED);
         if (finalCheckmark) finalCheckmark.click();
 
@@ -347,9 +408,22 @@
                 return;
             }
 
+            // Speichere die markierten Blöcke
+            const markedBlocksInfo = markedBlocks.map(block => ({
+                block,
+                wasChecked: true
+            }));
+
+            // Deaktiviere alle Checkmarks
             const allCheckmarks = document.querySelectorAll(SELECTORS.CHECKED);
             allCheckmarks.forEach(checkmark => checkmark.click());
-            await sleep(WAIT_TIME);
+
+            // Warte bis alle Checkmarks deaktiviert sind
+            const allUnchecked = await waitForElementToDisappear(SELECTORS.CHECKED);
+            if (!allUnchecked) {
+                showStatus('Timeout: Konnte nicht alle Checkmarks deaktivieren', true);
+                return;
+            }
             
             await processBlocks(markedBlocks);
         });
